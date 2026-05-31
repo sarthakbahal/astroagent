@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #08080f;
+  --surface: #0e0e1a;
+  --surface-2: #14142a;
+  --border: #1e1e3a;
+  --accent: #c9a84c;
+  --accent-dim: #8a6f2e;
+  --text: #e8e4d9;
+  --text-muted: #7a7568;
+  --planet-glow: #c9a84c22;
+  --danger: #8b3a3a;
+}
+
+html,
+body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+::selection {
+  background: var(--planet-glow);
+}
+
+/* Animations */
+@keyframes pulse-glow {
+  0% {
+    text-shadow: 0 0 0 rgba(201, 168, 76, 0);
+  }
+  50% {
+    text-shadow: 0 0 10px rgba(201, 168, 76, 0.22);
+  }
+  100% {
+    text-shadow: 0 0 0 rgba(201, 168, 76, 0);
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes tool-complete {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+}
+
+@keyframes star-drift {
+  from {
+    transform: rotate(0deg);
+    opacity: 0.04;
+  }
+  to {
+    transform: rotate(360deg);
+    opacity: 0.04;
+  }
+}
+
+.fade-in-up {
+  animation: fade-in-up 0.4s ease both;
+}
+
+.aradhana-label {
+  animation: pulse-glow 3s ease-in-out infinite;
+}
+
+.tool-complete {
+  animation: tool-complete 1s ease forwards;
+}
+
+.compass-drift {
+  animation: star-drift 120s linear infinite;
+}
+
+/* Input appearance */
+.ledger-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  outline: none;
+  padding: 10px 0;
+}
+
+.ledger-input::placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.ledger-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+}
