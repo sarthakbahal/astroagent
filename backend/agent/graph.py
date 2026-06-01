@@ -46,6 +46,10 @@ def _should_continue_reasoning(state: AgentState) -> str:
     if int(state.get("step_count", 0)) >= 8:
         return "respond"
 
+    natal_chart = state.get("natal_chart")
+    if isinstance(natal_chart, dict) and natal_chart.get("error"):
+        return "respond"
+
     msgs = state.get("messages", [])
     if not msgs:
         return "respond"

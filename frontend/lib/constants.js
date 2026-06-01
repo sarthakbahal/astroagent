@@ -9,6 +9,8 @@ export const PLANET_SYMBOLS = {
   Uranus: "♅",
   Neptune: "♆",
   Pluto: "♇",
+  Rahu: "☊",
+  Ketu: "☋",
 };
 
 export const ZODIAC_GLYPHS = {

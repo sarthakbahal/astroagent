@@ -22,12 +22,17 @@ export default function ToolActivity({ events }) {
 
   const lines = useMemo(() => {
     const active = new Set();
+    let lastError = null;
     for (const e of events) {
       if (e.type === "tool_start" && e.tool) active.add(e.tool);
       if (e.type === "tool_end" && e.tool) active.delete(e.tool);
+      if (e.type === "error") lastError = e.error || "Unknown error";
     }
 
     const out = [];
+    if (lastError) {
+      out.push({ tool: "__error__", status: "error", error: String(lastError) });
+    }
     // Show recently completed first, then active
     for (const tool of Object.keys(completed)) {
       out.push({ tool, status: "done" });
@@ -43,7 +48,12 @@ export default function ToolActivity({ events }) {
   return (
     <div className="px-4 py-2 text-xs" style={{ color: "var(--text-muted)" }}>
       {lines.slice(0, 4).map((l) => {
-        const label = l.status === "done" ? TOOL_DONE[l.tool] || `✓ ${l.tool}` : TOOL_LABELS[l.tool] || `⟳ ${l.tool}...`;
+        const label =
+          l.status === "error"
+            ? `! ${l.error}`
+            : l.status === "done"
+            ? TOOL_DONE[l.tool] || `✓ ${l.tool}`
+            : TOOL_LABELS[l.tool] || `⟳ ${l.tool}...`;
         const doneAt = completed[l.tool];
         const shouldFade = l.status === "done" && doneAt && Date.now() - doneAt > 3000;
         return (

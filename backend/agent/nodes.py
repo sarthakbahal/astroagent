@@ -9,7 +9,7 @@ from langchain_groq import ChatGroq
 
 from backend.agent.state import AgentState, BirthDetails
 from backend.agent.tools import compute_birth_chart, geocode_place, get_daily_transits, knowledge_lookup
-from backend.streaming import get_stream_queue
+from backend.streaming import get_stream_context
 
 
 Intent = Literal["chart_request", "transit_ask", "general", "off_topic", "needs_details"]
@@ -36,6 +36,12 @@ positions — your tools give you real data.
 For general educational questions (sign meanings, planets in houses, aspects),
 consult your reference notes using knowledge_lookup.
 
+You use the Vedic sidereal system (Lahiri ayanamsa). When a user mentions their
+"sign", clarify whether they mean their Vedic Sun sign (which may differ from
+their Western sun sign by approximately one sign). Always refer to Rahu and
+Ketu in readings — they are shadow planets that reveal karmic patterns and are
+essential in Jyotish readings.
+
 IMPORTANT GUARDRAIL: You must never present astrological readings 
 as medical, legal, or financial certainty. If asked for such 
 certainty, gently redirect: astrology offers reflection and 
@@ -59,20 +65,68 @@ RESPOND_SYSTEM_PROMPT = (
 )
 
 
+def _chart_brief(chart: Any) -> str:
+    """Return a compact, model-friendly chart summary."""
+
+    if not isinstance(chart, dict):
+        return ""
+    if chart.get("error"):
+        return f"error: {chart.get('error')}"
+
+    planets = chart.get("planets") or {}
+    picks = ["Sun", "Moon", "Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Rahu", "Ketu"]
+    parts = []
+    for name in picks:
+        p = planets.get(name)
+        if not isinstance(p, dict):
+            continue
+        sign = p.get("sign") or ""
+        deg = p.get("degree")
+        house = p.get("house")
+        if isinstance(deg, (int, float)) and house is not None:
+            parts.append(f"{name}:{sign} {float(deg):.1f}° H{house}")
+        elif isinstance(deg, (int, float)):
+            parts.append(f"{name}:{sign} {float(deg):.1f}°")
+        else:
+            parts.append(f"{name}:{sign}")
+
+    asc = chart.get("ascendant") or {}
+    mc = chart.get("midheaven") or {}
+    asc_str = f"Asc:{asc.get('sign','')} {asc.get('degree','')}°" if isinstance(asc, dict) else ""
+    mc_str = f"MC:{mc.get('sign','')} {mc.get('degree','')}°" if isinstance(mc, dict) else ""
+
+    houses = chart.get("houses") or {}
+    house_pick = []
+    for h in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"]:
+        if h in houses:
+            house_pick.append(f"{h}:{houses[h]}")
+
+    system = chart.get("system") or ""
+    meta = chart.get("meta") or {}
+    ay = meta.get("ayanamsa")
+    tail = []
+    if system:
+        tail.append(f"system={system}")
+    if ay is not None:
+        tail.append(f"ayanamsa={ay}")
+
+    return " | ".join([p for p in [", ".join(parts), asc_str, mc_str, ", ".join(house_pick), ", ".join(tail)] if p])
+
+
 def _llm(temp: float, streaming: bool = False):
     callbacks = []
     if streaming:
-        q = get_stream_queue()
-        if q is not None:
+        ctx = get_stream_context()
+        if ctx is not None:
             from backend.streaming import QueueStreamingCallback
 
-            callbacks = [QueueStreamingCallback(q)]
+            callbacks = [QueueStreamingCallback()]
     return ChatGroq(
         model="llama-3.1-8b-instant",
         temperature=temp,
         streaming=streaming,
         callbacks=callbacks,
-        max_tokens=512,
+        max_tokens=256,
     )
 
 
@@ -236,20 +290,19 @@ def respond_node(state: AgentState) -> Dict[str, Any]:
         "tool_calls_made": state.get("tool_calls_made") or [],
     }
     if chart:
-        extra_context["natal_chart"] = chart
+        extra_context["natal_chart"] = _chart_brief(chart)
     if transit_summary:
-        extra_context["daily_transits"] = transit_summary
+        extra_context["daily_transits"] = transit_summary[:3]
 
     llm = _llm(0.7, streaming=True)
 
-    # The final user-facing answer should be based on all messages so far.
-    # We add context as a system message to anchor specificity.
-    msgs = list(state.get("messages", []))
+    # Keep the prompt small: only the latest user text plus compact data.
+    user_text = _latest_user_text(state)
     final = llm.invoke(
         [
             SystemMessage(content=RESPOND_SYSTEM_PROMPT),
             SystemMessage(content="Available computed data (JSON):\n" + json.dumps(extra_context, ensure_ascii=False)),
-            *msgs,
+            HumanMessage(content=user_text),
         ]
     )
 

@@ -9,6 +9,7 @@ from flatlib import const
 from flatlib.chart import Chart
 from flatlib.datetime import Datetime
 from flatlib.geopos import GeoPos
+import swisseph as swe
 
 
 PLANETS: List[str] = [
@@ -22,6 +23,7 @@ PLANETS: List[str] = [
     const.URANUS,
     const.NEPTUNE,
     const.PLUTO,
+    const.NORTH_NODE,
 ]
 
 PLANET_NAME_MAP: Dict[str, str] = {
@@ -35,6 +37,7 @@ PLANET_NAME_MAP: Dict[str, str] = {
     const.URANUS: "Uranus",
     const.NEPTUNE: "Neptune",
     const.PLUTO: "Pluto",
+    const.NORTH_NODE: "Rahu",
 }
 
 
@@ -153,43 +156,103 @@ def compute_natal_chart(
 
     date = Datetime(flat_date_str, time_str, utc_offset)
     pos = GeoPos(lat, lng)
-    chart = Chart(date, pos, IDs=const.LIST_OBJECTS)
 
-    cusps = _house_cusps(chart)
+    # Sidereal mode (Lahiri ayanamsa) for Vedic/Jyotish.
+    try:
+        swe.set_sid_mode(swe.SIDM_LAHIRI, 0, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+    chart = Chart(date, pos, IDs=PLANETS, hsys=const.HOUSES_PLACIDUS)
+
+    try:
+        ay = float(swe.get_ayanamsa_ut(date.jd))
+    except Exception:  # noqa: BLE001
+        try:
+            ay = float(swe.get_ayanamsa(date.jd))
+        except Exception:  # noqa: BLE001
+            ay = 0.0
+
+    def to_sidereal(tropical_lon: float) -> float:
+        return (float(tropical_lon) - ay) % 360.0
+
+    def lon_to_sign(lon: float) -> Tuple[str, float]:
+        names = [
+            "Aries",
+            "Taurus",
+            "Gemini",
+            "Cancer",
+            "Leo",
+            "Virgo",
+            "Libra",
+            "Scorpio",
+            "Sagittarius",
+            "Capricorn",
+            "Aquarius",
+            "Pisces",
+        ]
+        idx = int((lon % 360.0) / 30.0)
+        deg = lon % 30.0
+        return names[idx], round(deg, 2)
+
+    # Build sidereal house cusps from tropical cusps.
+    raw_cusps = _house_cusps(chart)
+    cusps = [(i, to_sidereal(lon)) for i, lon in raw_cusps]
 
     planets: Dict[str, Dict[str, Any]] = {}
     for pid in PLANETS:
         obj = chart.getObject(pid)
-        lon = float(obj.lon)
-        planets[PLANET_NAME_MAP[pid]] = {
-            "sign": obj.sign,
-            "degree": float(lon % 30.0),
-            "house": _house_for_lon(lon, cusps),
-            "lon": lon,
+        trop_lon = float(obj.lon)
+        sid_lon = to_sidereal(trop_lon)
+        sign_name, deg_in_sign = lon_to_sign(sid_lon)
+        pname = PLANET_NAME_MAP.get(pid, str(pid))
+        planets[pname] = {
+            "sign": sign_name,
+            "degree": deg_in_sign,
+            "house": _house_for_lon(sid_lon, cusps),
+            "lon": sid_lon,
         }
 
-    houses: Dict[int, str] = {}
+    # Ketu is always exactly opposite Rahu.
+    if "Rahu" in planets:
+        rahu_lon = float(planets["Rahu"]["lon"])
+        ketu_lon = (rahu_lon + 180.0) % 360.0
+        k_sign, k_deg = lon_to_sign(ketu_lon)
+        planets["Ketu"] = {
+            "sign": k_sign,
+            "degree": k_deg,
+            "house": _house_for_lon(ketu_lon, cusps),
+            "lon": ketu_lon,
+        }
+
+    houses: Dict[str, str] = {}
     for i in range(1, 13):
-        h = chart.getHouse(f"House{i}")
-        houses[i] = h.sign
+        _, cusp_sid = cusps[i - 1]
+        houses[str(i)] = lon_to_sign(cusp_sid)[0]
 
     asc = chart.getAngle(const.ASC)
     mc = chart.getAngle(const.MC)
+    asc_sid = to_sidereal(float(asc.lon))
+    mc_sid = to_sidereal(float(mc.lon))
+    asc_sign, asc_deg = lon_to_sign(asc_sid)
+    mc_sign, mc_deg = lon_to_sign(mc_sid)
 
     return {
         "planets": {
-            k: {"sign": v["sign"], "degree": round(v["degree"], 2), "house": v["house"], "lon": round(float(v["lon"]), 6)}
+            k: {"sign": v["sign"], "degree": round(float(v["degree"]), 2), "house": v["house"], "lon": round(float(v["lon"]), 6)}
             for k, v in planets.items()
         },
         "houses": houses,
-        "ascendant": asc.sign,
-        "midheaven": mc.sign,
+        "ascendant": {"sign": asc_sign, "degree": round(float(asc_deg), 2)},
+        "midheaven": {"sign": mc_sign, "degree": round(float(mc_deg), 2)},
+        "system": "sidereal_lahiri",
         "meta": {
             "date": date_str,
             "time": time_str,
             "utc_offset": utc_offset,
             "lat": lat,
             "lng": lng,
+            "ayanamsa": round(ay, 6),
         },
     }
 
@@ -247,9 +310,26 @@ def compute_transits_summary(*, natal_chart: Dict[str, Any], target_date: str) -
     flat_target = target_date.replace("-", "/")
     date = Datetime(flat_target, "12:00", utc_offset)
     pos = GeoPos(lat, lng)
-    tchart = Chart(date, pos, IDs=const.LIST_OBJECTS)
 
-    t_cusps = _house_cusps(tchart)
+    try:
+        swe.set_sid_mode(swe.SIDM_LAHIRI, 0, 0)
+    except Exception:  # noqa: BLE001
+        pass
+
+    tchart = Chart(date, pos, IDs=PLANETS, hsys=const.HOUSES_PLACIDUS)
+
+    try:
+        ay = float(swe.get_ayanamsa_ut(date.jd))
+    except Exception:  # noqa: BLE001
+        try:
+            ay = float(swe.get_ayanamsa(date.jd))
+        except Exception:  # noqa: BLE001
+            ay = 0.0
+
+    def to_sidereal(tropical_lon: float) -> float:
+        return (float(tropical_lon) - ay) % 360.0
+
+    t_cusps = [(i, to_sidereal(lon)) for i, lon in _house_cusps(tchart)]
 
     natal_planets = natal_chart["planets"]
 
@@ -284,7 +364,7 @@ def compute_transits_summary(*, natal_chart: Dict[str, Any], target_date: str) -
         if not pid:
             continue
         tobj = tchart.getObject(pid)
-        t_lon = float(tobj.lon)
+        t_lon = to_sidereal(float(tobj.lon))
         t_house = _house_for_lon(t_lon, t_cusps)
 
         for nname, ndeg in natal_lon.items():

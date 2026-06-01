@@ -21,7 +21,7 @@ from backend.agent.state import BirthDetails
 from backend.db.crud import create_message, delete_history, list_messages
 from backend.db.database import get_engine, get_session
 from backend.db.models import Base
-from backend.streaming import reset_stream_queue, set_stream_queue
+from backend.streaming import StreamContext, reset_stream_context, set_stream_context
 
 
 class BirthDetailsModel(BaseModel):
@@ -49,7 +49,19 @@ class HistoryMessage(BaseModel):
 
 def _cors_origins() -> List[str]:
     frontend = os.getenv("FRONTEND_URL", "http://localhost:3000").strip()
-    return sorted(list({"http://localhost:3000", frontend, "https://astroagent.vercel.app"}))
+    # Next.js dev server may bump ports (e.g. 3001) if 3000 is in use.
+    return sorted(
+        list(
+            {
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:3001",
+                frontend,
+                "https://astroagent.vercel.app",
+            }
+        )
+    )
 
 
 @asynccontextmanager
@@ -124,14 +136,15 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
     }
 
     q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
-    token = set_stream_queue(q)
+    loop = asyncio.get_running_loop()
 
     async def run_graph() -> Dict[str, Any]:
+        token = set_stream_context(StreamContext(loop=loop, queue=q))
         try:
             # Run graph in a thread to avoid blocking; nodes are sync.
             return await asyncio.to_thread(GRAPH.invoke, state)
         finally:
-            reset_stream_queue(token)
+            reset_stream_context(token)
 
     task = asyncio.create_task(run_graph())
 
@@ -189,9 +202,11 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
                 extra={"natal_chart": natal_chart} if natal_chart else None,
             )
 
-            # Optionally emit chart for UI
-            if natal_chart:
+            # Emit chart for UI only when it's a real chart.
+            if isinstance(natal_chart, dict) and natal_chart.get("planets"):
                 yield _sse({"type": "chart", "chart": natal_chart})
+            elif isinstance(natal_chart, dict) and natal_chart.get("error"):
+                yield _sse({"type": "error", "error": str(natal_chart.get("error"))})
 
             yield _sse({"type": "done"})
         except Exception as exc:  # noqa: BLE001

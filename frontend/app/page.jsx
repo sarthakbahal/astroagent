@@ -54,10 +54,10 @@ export default function Page() {
   function onBirthSubmit(details) {
     setBirthDetails(details);
     // Optional: nudge the agent to begin
-    sendMessage("Cast my chart and tell me what stands out.");
+    sendMessage("Cast my chart and tell me what stands out.", details);
   }
 
-  async function sendMessage(text) {
+  async function sendMessage(text, birthOverride) {
     if (!sessionId) return;
 
     setBusy(true);
@@ -71,10 +71,12 @@ export default function Page() {
 
     let assistantAccum = "";
 
+    const detailsToSend = birthOverride || birthDetails;
+
     await chatSse({
       message: text,
       sessionId,
-      birthDetails,
+      birthDetails: detailsToSend,
       callbacks: {
         onToken: (t) => {
           assistantAccum += t;

@@ -26,8 +26,9 @@
  * @typedef {Object} ChartData
  * @property {Object.<string, {sign: string, degree: number, house: number}>} planets
  * @property {Object.<string, string>} houses
- * @property {string} ascendant
- * @property {string} midheaven
+ * @property {{sign: string, degree: number}} ascendant
+ * @property {{sign: string, degree: number}} midheaven
+ * @property {string=} system
  */
 
 /**
