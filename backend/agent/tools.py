@@ -9,12 +9,12 @@ from backend.services.ephemeris import (
     compute_natal_chart,
     compute_transits_summary,
 )
-from backend.services.geocoding import geocode_place_name_async
+from backend.services.geocoding import geocode_place_name
 from backend.services.knowledge import keyword_rag_lookup
 
 
 @tool
-async def geocode_place(place_name: str) -> Dict[str, Any]:
+def geocode_place(place_name: str) -> Dict[str, Any]:
     """Resolve a human place name into latitude/longitude and timezone.
 
     Use this tool whenever the user gives a place of birth that is not yet
@@ -32,7 +32,7 @@ async def geocode_place(place_name: str) -> Dict[str, Any]:
     if not place_name:
         return {"error": "Place not found"}
 
-    result = await geocode_place_name_async(place_name)
+    result = geocode_place_name(place_name)
     if "error" in result:
         return {"error": "Place not found"}
     return result

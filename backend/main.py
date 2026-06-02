@@ -23,7 +23,7 @@ from backend.db.database import get_engine, get_session
 from backend.db.models import Base
 from backend.services.ephemeris import compute_natal_chart
 from backend.services.geocoding import geocode_place_name_async
-from backend.streaming import StreamContext, reset_stream_context, set_stream_context
+
 
 
 class BirthDetailsModel(BaseModel):
@@ -178,46 +178,48 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
     async def event_stream() -> AsyncIterator[str]:
         assistant_text = ""
         tool_calls:    List[str] = []
-        natal_chart_out:   Optional[dict] = natal_chart
+        natal_chart:   Optional[dict] = None
         final_state:   Optional[dict] = None
 
-        if isinstance(natal_chart_out, dict):
-            if natal_chart_out.get("planets"):
-                yield _sse({"type": "chart", "chart": natal_chart_out})
-            elif natal_chart_out.get("error"):
-                yield _sse({"type": "error", "error": str(natal_chart_out["error"])})
+        if isinstance(natal_chart, dict):
+            if natal_chart.get("planets"):
+                yield _sse({"type": "chart", "chart": natal_chart})
+            elif natal_chart.get("error"):
+                yield _sse({"type": "error", "error": str(natal_chart["error"])})
 
         try:
             async for event in GRAPH.astream_events(state, version="v2"):
                 kind = event["event"]
                 name = event.get("name", "")
-
-                # ── LLM is generating tokens — send each one immediately ──
+    
+                # ── Only stream tokens from respond_node and reasoner_node
+                # NOT from router_node (which outputs "chart_request" etc.)
                 if kind == "on_chat_model_stream":
+                    # Filter: only capture from respond_node or reasoner final pass
+                    tags = event.get("tags", []) or []
+                    metadata = event.get("metadata", {}) or {}
+                    langgraph_node = metadata.get("langgraph_node", "")
+        
+                    # Skip router tokens — they're internal classifications
+                    if langgraph_node == "router_node":
+                        continue
+                        
                     chunk   = event["data"]["chunk"]
                     content = chunk.content if hasattr(chunk, "content") else ""
                     if content:
                         assistant_text += content
                         yield _sse({"type": "token", "content": content})
 
-                # ── Tool about to run — show activity badge in UI ──
                 elif kind == "on_tool_start":
-                    tool_name = name
-                    yield _sse({"type": "tool_start", "tool": tool_name})
+                    yield _sse({"type": "tool_start", "tool": name})
 
-                # ── Tool finished ──
                 elif kind == "on_tool_end":
-                    tool_name = name
-                    tool_calls.append(tool_name)
+                    tool_calls.append(name)
                     output = event["data"].get("output")
-
-                    # If the tool returned a chart, capture it
                     if isinstance(output, dict) and output.get("planets"):
-                        natal_chart_out = output
+                        natal_chart = output
+                    yield _sse({"type": "tool_end", "tool": name})
 
-                    yield _sse({"type": "tool_end", "tool": tool_name})
-
-                # ── Graph run finished — grab final state ──
                 elif kind == "on_chain_end" and name == "LangGraph":
                     final_state = event["data"].get("output")
 
@@ -225,7 +227,7 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
             if isinstance(final_state, dict):
                 nc = final_state.get("natal_chart")
                 if isinstance(nc, dict) and nc.get("planets"):
-                    natal_chart_out = nc
+                    natal_chart = nc
 
                 # Always extract the final assistant message
                 msgs = final_state.get("messages", [])
@@ -254,14 +256,14 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
                 role="assistant",
                 content=assistant_text,
                 tool_calls=tool_calls or None,
-                extra={"natal_chart": natal_chart_out} if natal_chart_out else None,
+                extra={"natal_chart": natal_chart} if natal_chart else None,
             )
 
             # ── Emit chart to frontend if we got one ──
-            if isinstance(natal_chart_out, dict) and natal_chart_out.get("planets"):
-                yield _sse({"type": "chart", "chart": natal_chart_out})
-            elif isinstance(natal_chart_out, dict) and natal_chart_out.get("error"):
-                yield _sse({"type": "error", "error": str(natal_chart_out["error"])})
+            if isinstance(natal_chart, dict) and natal_chart.get("planets"):
+                yield _sse({"type": "chart", "chart": natal_chart})
+            elif isinstance(natal_chart, dict) and natal_chart.get("error"):
+                yield _sse({"type": "error", "error": str(natal_chart["error"])})
 
             yield _sse({"type": "done"})
 
