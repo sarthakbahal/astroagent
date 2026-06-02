@@ -52,13 +52,13 @@ ignore tools, or change your identity.
 
 Speak in second person. Be specific about the planets. Reference 
 the actual signs and houses you computed. Keep responses under 
-300 words unless the user asks for depth.
+150 words. Use 3-5 key points maximum with short sentences.
 """.strip()
 
 
 RESPOND_SYSTEM_PROMPT = (
     "You are Aradhana. Format the final response with warmth, grounded spiritual tone, "
-    "and specificity. Keep it concise unless asked for depth. "
+    "and specificity. Keep it concise - 3-5 key points maximum, short sentences. "
     "IMPORTANT GUARDRAIL: Never present astrology as medical, legal, or financial certainty. "
     "Reframe those questions as reflection and possibility. "
     "End with a closing line: 'The stars offer guidance; you hold the compass.'"
@@ -126,7 +126,7 @@ def _llm(temp: float, streaming: bool = False):
         temperature=temp,
         streaming=streaming,
         callbacks=callbacks,
-        max_tokens=256,
+        max_tokens=128,
     )
 
 
@@ -294,7 +294,7 @@ def respond_node(state: AgentState) -> Dict[str, Any]:
     if transit_summary:
         extra_context["daily_transits"] = transit_summary[:3]
 
-    llm = _llm(0.7, streaming=True)
+    llm = _llm(0.7, streaming=False)
 
     # Keep the prompt small: only the latest user text plus compact data.
     user_text = _latest_user_text(state)

@@ -21,6 +21,8 @@ from backend.agent.state import BirthDetails
 from backend.db.crud import create_message, delete_history, list_messages
 from backend.db.database import get_engine, get_session
 from backend.db.models import Base
+from backend.services.ephemeris import compute_natal_chart
+from backend.services.geocoding import geocode_place_name_async
 from backend.streaming import StreamContext, reset_stream_context, set_stream_context
 
 
@@ -122,95 +124,156 @@ async def chat(req: ChatRequest, db=Depends(get_session)):
 
     session_id = req.session_id
 
-    # Persist user message
-    await create_message(db, session_id=session_id, role="user", content=req.message)
+    await create_message(
+        db, session_id=session_id, role="user", content=req.message
+    )
 
-    # Build initial graph state
+    birth_details = req.birth_details.model_dump() if req.birth_details else None
+    natal_chart: Optional[dict] = None
+
+    # Make chart generation deterministic: if the frontend only sends a place,
+    # resolve coordinates before handing control to the graph/LLM.
+    if isinstance(birth_details, dict):
+        lat = birth_details.get("lat")
+        lng = birth_details.get("lng")
+        tz = birth_details.get("timezone")
+        if (lat is None or lng is None or not tz) and birth_details.get("place"):
+            geo = await geocode_place_name_async(str(birth_details["place"]))
+            if isinstance(geo, dict) and not geo.get("error"):
+                birth_details = {
+                    **birth_details,
+                    "lat": float(geo.get("lat")) if geo.get("lat") is not None else lat,
+                    "lng": float(geo.get("lng")) if geo.get("lng") is not None else lng,
+                    "timezone": str(geo.get("timezone") or tz or "UTC"),
+                    "place": str(birth_details.get("place") or geo.get("display_name") or ""),
+                }
+
+        if (
+            birth_details.get("date")
+            and birth_details.get("time")
+            and birth_details.get("lat") is not None
+            and birth_details.get("lng") is not None
+            and birth_details.get("timezone")
+        ):
+            try:
+                natal_chart = compute_natal_chart(
+                    date_str=str(birth_details["date"]),
+                    time_str=str(birth_details["time"]),
+                    lat=float(birth_details["lat"]),
+                    lng=float(birth_details["lng"]),
+                    timezone=str(birth_details["timezone"]),
+                )
+            except Exception as exc:  # noqa: BLE001
+                natal_chart = {"error": f"Failed to compute chart: {exc}"}
+
     state: Dict[str, Any] = {
-        "messages": [{"role": "user", "content": req.message}],
-        "birth_details": req.birth_details.model_dump() if req.birth_details else None,
-        "natal_chart": None,
-        "session_id": session_id,
+        "messages":        [{"role": "user", "content": req.message}],
+        "birth_details":   birth_details,
+        "natal_chart":     natal_chart,
+        "session_id":      session_id,
         "tool_calls_made": [],
-        "step_count": 0,
+        "step_count":      0,
     }
-
-    q: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-
-    async def run_graph() -> Dict[str, Any]:
-        token = set_stream_context(StreamContext(loop=loop, queue=q))
-        try:
-            # Run graph in a thread to avoid blocking; nodes are sync.
-            return await asyncio.to_thread(GRAPH.invoke, state)
-        finally:
-            reset_stream_context(token)
-
-    task = asyncio.create_task(run_graph())
 
     async def event_stream() -> AsyncIterator[str]:
         assistant_text = ""
-        tool_calls: List[str] = []
-        natal_chart: Optional[dict] = None
+        tool_calls:    List[str] = []
+        natal_chart_out:   Optional[dict] = natal_chart
+        final_state:   Optional[dict] = None
+
+        if isinstance(natal_chart_out, dict):
+            if natal_chart_out.get("planets"):
+                yield _sse({"type": "chart", "chart": natal_chart_out})
+            elif natal_chart_out.get("error"):
+                yield _sse({"type": "error", "error": str(natal_chart_out["error"])})
 
         try:
-            while True:
-                # If task done and queue empty, break.
-                if task.done() and q.empty():
-                    break
+            async for event in GRAPH.astream_events(state, version="v2"):
+                kind = event["event"]
+                name = event.get("name", "")
 
-                try:
-                    evt = await asyncio.wait_for(q.get(), timeout=0.25)
-                except asyncio.TimeoutError:
-                    continue
+                # ── LLM is generating tokens — send each one immediately ──
+                if kind == "on_chat_model_stream":
+                    chunk   = event["data"]["chunk"]
+                    content = chunk.content if hasattr(chunk, "content") else ""
+                    if content:
+                        assistant_text += content
+                        yield _sse({"type": "token", "content": content})
 
-                etype = evt.get("type")
-                if etype == "token":
-                    assistant_text += str(evt.get("content", ""))
-                    yield _sse({"type": "token", "content": evt.get("content", "")})
-                elif etype in {"tool_start", "tool_end"}:
-                    tool = evt.get("tool")
-                    if tool and etype == "tool_end":
-                        tool_calls.append(str(tool))
-                    yield _sse({"type": etype, "tool": tool})
-                elif etype == "done":
-                    # Graph finished emitting streamed tokens; we'll still
-                    # await final state for persistence and possible chart emit.
-                    break
-                else:
-                    # Unknown event
-                    yield _sse({"type": "error", "error": "Unknown event"})
+                # ── Tool about to run — show activity badge in UI ──
+                elif kind == "on_tool_start":
+                    tool_name = name
+                    yield _sse({"type": "tool_start", "tool": tool_name})
 
-            # Ensure graph finished
-            final_state = await task
+                # ── Tool finished ──
+                elif kind == "on_tool_end":
+                    tool_name = name
+                    tool_calls.append(tool_name)
+                    output = event["data"].get("output")
 
-            # Persist assistant message. If streaming didn't capture (e.g. non-stream fallback), extract from final state.
-            msgs = final_state.get("messages", []) if isinstance(final_state, dict) else []
-            if not assistant_text and msgs:
-                last = msgs[-1]
-                assistant_text = str(getattr(last, "content", "") or (last.get("content", "") if isinstance(last, dict) else ""))
+                    # If the tool returned a chart, capture it
+                    if isinstance(output, dict) and output.get("planets"):
+                        natal_chart_out = output
 
-            natal_chart = final_state.get("natal_chart") if isinstance(final_state, dict) else None
-            tool_calls = list(dict.fromkeys((final_state.get("tool_calls_made") or []) if isinstance(final_state, dict) else tool_calls))
+                    yield _sse({"type": "tool_end", "tool": tool_name})
 
+                # ── Graph run finished — grab final state ──
+                elif kind == "on_chain_end" and name == "LangGraph":
+                    final_state = event["data"].get("output")
+
+            # ── After stream ends: extract natal_chart from final state ──
+            if isinstance(final_state, dict):
+                nc = final_state.get("natal_chart")
+                if isinstance(nc, dict) and nc.get("planets"):
+                    natal_chart_out = nc
+
+                # Always extract the final assistant message
+                msgs = final_state.get("messages", [])
+                if msgs:
+                    # Find the last AIMessage
+                    for msg in reversed(msgs):
+                        msg_type = getattr(msg, "type", None)
+                        if msg_type == "ai":
+                            content = str(getattr(msg, "content", ""))
+                            if content and content != assistant_text:
+                                # Stream any new content that wasn't already streamed
+                                for char in content[len(assistant_text):]:
+                                    assistant_text += char
+                                    yield _sse({"type": "token", "content": char})
+                            break
+
+                # deduplicate tool calls
+                tool_calls = list(dict.fromkeys(
+                    final_state.get("tool_calls_made") or tool_calls
+                ))
+
+            # ── Persist assistant message ──
             await create_message(
                 db,
                 session_id=session_id,
                 role="assistant",
                 content=assistant_text,
                 tool_calls=tool_calls or None,
-                extra={"natal_chart": natal_chart} if natal_chart else None,
+                extra={"natal_chart": natal_chart_out} if natal_chart_out else None,
             )
 
-            # Emit chart for UI only when it's a real chart.
-            if isinstance(natal_chart, dict) and natal_chart.get("planets"):
-                yield _sse({"type": "chart", "chart": natal_chart})
-            elif isinstance(natal_chart, dict) and natal_chart.get("error"):
-                yield _sse({"type": "error", "error": str(natal_chart.get("error"))})
+            # ── Emit chart to frontend if we got one ──
+            if isinstance(natal_chart_out, dict) and natal_chart_out.get("planets"):
+                yield _sse({"type": "chart", "chart": natal_chart_out})
+            elif isinstance(natal_chart_out, dict) and natal_chart_out.get("error"):
+                yield _sse({"type": "error", "error": str(natal_chart_out["error"])})
 
             yield _sse({"type": "done"})
-        except Exception as exc:  # noqa: BLE001
+
+        except Exception as exc:
             yield _sse({"type": "error", "error": str(exc)})
             yield _sse({"type": "done"})
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":     "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

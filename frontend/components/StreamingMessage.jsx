@@ -8,6 +8,10 @@ export default function StreamingMessage({ content }) {
     ref.current.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [content]);
 
+  if (!content || content.trim() === "") {
+    return null;
+  }
+
   return (
     <div ref={ref} className="px-4 py-3 text-left" style={{ color: "var(--text)" }}>
       <div className="max-w-[88%]">
